@@ -1,0 +1,8 @@
+.venv
+.env
+__pycache__
+.chainlit
+.files
+lancedb
+storage
+converse.db

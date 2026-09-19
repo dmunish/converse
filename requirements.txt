@@ -1,0 +1,12 @@
+llama-index-core
+llama-index-llms-openrouter
+llama-index-embeddings-openai-like
+llama-index-vector-stores-lancedb
+lancedb
+tantivy
+sqlmodel
+fastapi
+uvicorn
+chainlit
+python-dotenv
+pandas
