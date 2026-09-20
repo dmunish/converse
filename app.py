@@ -19,8 +19,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Converse: LearnForge Support Assistant", lifespan=lifespan)
 
 
-# --- Schemas ---
-
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
@@ -41,32 +39,28 @@ class ChatResponse(BaseModel):
     reason: str | None = None
 
 
-# --- Root redirect ---
-
 @app.get("/")
 async def root():
     return RedirectResponse(url="/docs")
 
-
-# --- Chat (non-streaming) ---
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     return answer(req.message, req.session_id)
 
 
-# --- Chat (streaming via SSE) ---
-
 @app.post("/chat/stream")
-async def chat_stream(req: ChatRequest):
+def chat_stream(req: ChatRequest):
     def event_stream():
         for event in stream_answer(req.message, req.session_id):
-            if event["type"] == "meta":
-                event = {k: v for k, v in event.items() if k != "sources"}
             yield f"data: {json.dumps(event)}\n\n"
 
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
-# --- Reviewer / ops endpoints ---
 
 @app.get("/sessions/{session_id}/messages")
 def get_messages(session_id: str, db: Session = Depends(get_session)):
@@ -86,7 +80,9 @@ def list_escalations(db: Session = Depends(get_session)):
 
 @app.get("/evals/summary")
 def eval_summary(db: Session = Depends(get_session)):
-    logs = db.exec(select(QueryLog)).all()
+    logs = db.exec(
+        select(QueryLog).where(QueryLog.intent == "kb_question")
+    ).all()
     if not logs:
         return {"count": 0}
     latencies = sorted(l.latency_ms for l in logs)

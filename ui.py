@@ -1,9 +1,11 @@
 import json
+import os
 
 import httpx
 import chainlit as cl
 
-API_STREAM = "http://localhost:8000/chat/stream"
+API_BASE = os.getenv("CONVERSE_API", "http://localhost:8000")
+API_STREAM = f"{API_BASE}/chat/stream"
 
 _REASON_COPY = {
     "user_requested": "you asked for a human",
@@ -29,20 +31,37 @@ async def on_message(message: cl.Message):
     await answer_msg.send()
 
     meta = None
-    async with httpx.AsyncClient(timeout=None) as client:
-        async with client.stream(
-            "POST",
-            API_STREAM,
-            json={"message": message.content, "session_id": session_id},
-        ) as response:
-            async for line in response.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                event = json.loads(line[6:])
-                if event["type"] == "token":
-                    await answer_msg.stream_token(event["content"])
-                elif event["type"] == "meta":
-                    meta = event
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "POST",
+                API_STREAM,
+                json={"message": message.content, "session_id": session_id},
+            ) as response:
+                if response.status_code != 200:
+                    body = (await response.aread()).decode(errors="replace")
+                    await answer_msg.stream_token(
+                        "Sorry — the support backend returned "
+                        f"HTTP {response.status_code}. Please try again."
+                    )
+                    await answer_msg.update()
+                    return
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    event = json.loads(line[6:])
+                    if event["type"] == "token":
+                        await answer_msg.stream_token(event["content"])
+                    elif event["type"] == "meta":
+                        meta = event
+    except httpx.HTTPError as e:
+        await answer_msg.stream_token(
+            "Sorry — I couldn't reach the support backend. "
+            f"({e.__class__.__name__})"
+        )
+        await answer_msg.update()
+        return
 
     if not meta:
         return
@@ -52,4 +71,3 @@ async def on_message(message: cl.Message):
         await cl.Message(
             content=f"**Escalating to a human agent** — {why}."
         ).send()
-

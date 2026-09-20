@@ -21,9 +21,6 @@ from prompts import SYSTEM_PROMPT, GROUNDING_SYSTEM_PROMPT, ROUTER_PROMPT
 
 load_dotenv()
 
-# --------------------------------------------------------------------------- #
-# Models
-# --------------------------------------------------------------------------- #
 Settings.llm = GoogleGenAI(
     model=os.getenv("LLM_MODEL"),
     api_key=os.getenv("GEMINI_API_KEY"),
@@ -34,34 +31,22 @@ Settings.embed_model = GoogleGenAIEmbedding(
     api_key=os.getenv("GEMINI_API_KEY"),
 )
 
-# --------------------------------------------------------------------------- #
-# Index / retriever
-# --------------------------------------------------------------------------- #
 vector_store = LanceDBVectorStore(
     uri=os.getenv("LANCEDB_URI", "./lancedb"),
     table_name=os.getenv("LANCEDB_TABLE", "edtech_kb"),
     query_type="hybrid",
+    reranker=RRFReranker(),
 )
-vector_store._add_reranker(RRFReranker())
 storage_context = StorageContext.from_defaults(
     vector_store=vector_store, persist_dir="./storage",
 )
 index = load_index_from_storage(storage_context)
 
-retriever = index.as_retriever(
-    similarity_top_k=4,
-    vector_store_kwargs={"query_type": "hybrid"},
-)
+retriever = index.as_retriever(similarity_top_k=4)
 
-# --------------------------------------------------------------------------- #
-# Config
-# --------------------------------------------------------------------------- #
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.6"))
 HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "6"))
 
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
 _HUMAN_REQUEST_PATTERNS = [
     re.compile(r"\b(human|real person|live agent|human agent|human representative)\b", re.I),
     re.compile(r"\b(talk|speak|chat)\s+to\s+(a\s+|an\s+)?(human|agent|representative|person|someone)\b", re.I),
@@ -70,6 +55,8 @@ _HUMAN_REQUEST_PATTERNS = [
 
 
 def _load_history(session_id: str, limit: int = HISTORY_LIMIT) -> list[ChatMessageRow]:
+    if limit % 2:
+        limit -= 1
     with Session(engine) as db:
         rows = db.exec(
             select(ChatMessageRow)
@@ -88,7 +75,6 @@ def _persist_message(session_id: str, role: str, content: str) -> None:
 
 
 def _condense_query(message: str, history: list[ChatMessageRow]) -> str:
-    """Rewrite a follow-up into a standalone question using prior turns."""
     if not history:
         return message
     hist_text = "\n".join(f"{m.role}: {m.content}" for m in history)
@@ -127,12 +113,6 @@ def _build_messages(
     history: list[ChatMessageRow],
     chunks: list[dict],
 ) -> list[ChatMessage]:
-    """Assemble the chat payload.
-
-    Order matters for prompt caching: the static system prompt is first, then
-    the conversation history, then the per-query retrieved excerpts as
-    separate system messages, then the current user turn.
-    """
     msgs: list[ChatMessage] = [
         ChatMessage(role=MessageRole.SYSTEM, content=SYSTEM_PROMPT),
     ]
@@ -163,19 +143,20 @@ def _build_messages(
     msgs.append(ChatMessage(role=MessageRole.USER, content=query))
     return msgs
 
+
 def _build_messages_direct(
-        message: str,
-        history: list[ChatMessageRow],
-    ) -> list[ChatMessage]:
-        """Static system prompt + history + current user turn. No excerpts."""
-        msgs: list[ChatMessage] = [
-            ChatMessage(role=MessageRole.SYSTEM, content=SYSTEM_PROMPT),
-        ]
-        for m in history:
-            role = MessageRole.USER if m.role == "user" else MessageRole.ASSISTANT
-            msgs.append(ChatMessage(role=role, content=m.content))
-        msgs.append(ChatMessage(role=MessageRole.USER, content=message))
-        return msgs
+    message: str,
+    history: list[ChatMessageRow],
+) -> list[ChatMessage]:
+    msgs: list[ChatMessage] = [
+        ChatMessage(role=MessageRole.SYSTEM, content=SYSTEM_PROMPT),
+    ]
+    for m in history:
+        role = MessageRole.USER if m.role == "user" else MessageRole.ASSISTANT
+        msgs.append(ChatMessage(role=role, content=m.content))
+    msgs.append(ChatMessage(role=MessageRole.USER, content=message))
+    return msgs
+
 
 def _route(message: str) -> str:
     try:
@@ -186,10 +167,17 @@ def _route(message: str) -> str:
         raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         return json.loads(raw).get("intent", "kb_question")
     except Exception:
-        return "kb_question"  # safe default: fall through to the strict path
+        return "kb_question"
+
+
+_GRADER_FAILURE = {
+    "answerable": False,
+    "grounded": False,
+    "confidence": 0.0,
+}
+
 
 def _grade(query: str, chunks: list[dict], answer_text: str) -> dict:
-    """Strict LLM-as-judge pass that catches hallucination / non-answer."""
     excerpts = "\n\n".join(
         f"[{i}] {c['content']}" for i, c in enumerate(chunks, start=1)
     ) or "(none)"
@@ -205,26 +193,13 @@ def _grade(query: str, chunks: list[dict], answer_text: str) -> dict:
     try:
         raw = str(Settings.llm.chat(msgs).message.content).strip()
     except Exception as e:
-        return {
-            "answerable": bool(chunks),
-            "grounded": bool(chunks),
-            "confidence": 0.5 if chunks else 0.0,
-            "reason": f"grader_error: {e}",
-        }
+        return {**_GRADER_FAILURE, "reason": f"grader_error: {e}"}
 
-    raw = (
-        raw.removeprefix("```json").removeprefix("```")
-        .removesuffix("```").strip()
-    )
+    raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
         data = json.loads(raw)
     except Exception:
-        return {
-            "answerable": bool(chunks),
-            "grounded": bool(chunks),
-            "confidence": 0.5 if chunks else 0.0,
-            "reason": "grader_parse_error",
-        }
+        return {**_GRADER_FAILURE, "reason": "grader_parse_error"}
 
     try:
         conf = float(data.get("confidence", 0.0))
@@ -264,6 +239,7 @@ def _finalize(
     grade: dict,
     reason: str | None,
     start: float,
+    intent: str = "kb_question",
 ) -> None:
     _persist_message(session_id, "assistant", answer_text)
     if reason:
@@ -278,6 +254,7 @@ def _finalize(
     with Session(engine) as db:
         db.add(QueryLog(
             session_id=session_id,
+            intent=intent,
             query=query,
             answer=answer_text,
             confidence=grade["confidence"],
@@ -301,28 +278,17 @@ def _meta_event(grade: dict, chunks: list[dict], reason: str | None) -> dict:
     }
 
 
-# --------------------------------------------------------------------------- #
-# Streaming generator — single source of truth
-# --------------------------------------------------------------------------- #
 def stream_answer(message: str, session_id: str = "default"):
-    """Yield {'type': 'token'|'meta', ...} events."""
     start = time.time()
 
-    # 1. Load prior history BEFORE persisting the current turn.
     history = _load_history(session_id)
-
-    # 2. Persist the user turn.
     _persist_message(session_id, "user", message)
-
-    # 3. Route the turn before doing any retrieval.
     intent = _route(message)
 
-    # ---- Short-circuit branches: no retrieval, no grader -------------------
     if intent in {"smalltalk", "human_request", "out_of_scope"}:
         messages = _build_messages_direct(message, history)
 
         if intent == "human_request":
-            # Skip the LLM entirely — hand off deterministically.
             answer_text = (
                 "Of course — I'm connecting you with a LearnForge human agent. "
                 "They'll be able to help with account-specific details."
@@ -331,7 +297,7 @@ def stream_answer(message: str, session_id: str = "default"):
             grade = {"answerable": False, "grounded": True, "confidence": 0.0,
                      "reason": "user requested human"}
             _finalize(session_id, message, answer_text, [], grade,
-                      "user_requested", start)
+                      "user_requested", start, intent)
             yield _meta_event(grade, [], "user_requested")
             return
 
@@ -345,12 +311,10 @@ def stream_answer(message: str, session_id: str = "default"):
             grade = {"answerable": False, "grounded": True, "confidence": 0.0,
                      "reason": "out of scope"}
             _finalize(session_id, message, answer_text, [], grade,
-                      "out_of_scope", start)
+                      "out_of_scope", start, intent)
             yield _meta_event(grade, [], "out_of_scope")
             return
 
-        # intent == "smalltalk": let the LLM stay in character, no citation
-        # or grading required.
         tokens: list[str] = []
         try:
             for delta in Settings.llm.stream_chat(messages):
@@ -368,26 +332,20 @@ def stream_answer(message: str, session_id: str = "default"):
             yield {"type": "token", "content": answer_text}
             grade = {"answerable": True, "grounded": True, "confidence": 1.0,
                      "reason": f"smalltalk_fallback: {e}"}
-            _finalize(session_id, message, answer_text, [], grade, None, start)
+            _finalize(session_id, message, answer_text, [], grade, None, start, intent)
             yield _meta_event(grade, [], None)
             return
 
         grade = {"answerable": True, "grounded": True, "confidence": 1.0,
                  "reason": "smalltalk"}
-        _finalize(session_id, message, answer_text, [], grade, None, start)
+        _finalize(session_id, message, answer_text, [], grade, None, start, intent)
         yield _meta_event(grade, [], None)
         return
 
-    # ---- kb_question: existing retrieve → generate → grade → gate path ----
-
-    # 4. Rewrite follow-ups into standalone queries.
     standalone = _condense_query(message, history) if history else message
-
-    # 5. Retrieve.
     chunks = _retrieve(standalone)
-
-    # 6. Assemble chat payload and stream tokens.
     messages = _build_messages(standalone, history, chunks)
+
     tokens: list[str] = []
     try:
         for delta in Settings.llm.stream_chat(messages):
@@ -406,11 +364,10 @@ def stream_answer(message: str, session_id: str = "default"):
         grade = {"answerable": False, "grounded": False, "confidence": 0.0,
                  "reason": f"generation_error: {e}"}
         _finalize(session_id, message, answer_text, chunks, grade,
-                  "generation_error", start)
+                  "generation_error", start, intent)
         yield _meta_event(grade, chunks, "generation_error")
         return
 
-    # 7. Grade the answer against the retrieved excerpts.
     if not chunks:
         grade = {"answerable": False, "grounded": False, "confidence": 0.0,
                  "reason": "no excerpts retrieved"}
@@ -420,17 +377,11 @@ def stream_answer(message: str, session_id: str = "default"):
     else:
         grade = _grade(standalone, chunks, answer_text)
 
-    # 8. Escalation gate.
     reason = _decide_escalation(message, chunks, grade)
-
-    # 9. Persist + log.
-    _finalize(session_id, message, answer_text, chunks, grade, reason, start)
-
+    _finalize(session_id, message, answer_text, chunks, grade, reason, start, intent)
     yield _meta_event(grade, chunks, reason)
 
-# --------------------------------------------------------------------------- #
-# Non-streaming wrapper
-# --------------------------------------------------------------------------- #
+
 def answer(message: str, session_id: str = "default") -> dict:
     events = list(stream_answer(message, session_id))
     text = "".join(e["content"] for e in events if e["type"] == "token")

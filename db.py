@@ -1,43 +1,53 @@
-from datetime import datetime
-from sqlmodel import SQLModel, Field, Session, create_engine
+from datetime import datetime, timezone
 from typing import Optional
 
-# --- Tables ---
+from sqlmodel import SQLModel, Field, Session, create_engine
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 class ChatMessage(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     session_id: str = Field(index=True)
-    role: str                    # "user" | "assistant"
+    role: str
     content: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
+
 
 class Escalation(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     session_id: str = Field(index=True)
-    reason: str                  # "low_confidence" | "no_docs" | "user_requested"
+    # low_confidence | no_docs | not_answerable | ungrounded
+    # | user_requested | out_of_scope | generation_error
+    reason: str
     confidence: float
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
+
 
 class QueryLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     session_id: str = Field(index=True)
+    intent: str = Field(default="kb_question", index=True)
     query: str
     answer: str
     confidence: float
-    sources: str                 # JSON-serialized source list
+    sources: str
     escalated: bool
     latency_ms: int
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
 
-# --- Engine + session dependency ---
 
 engine = create_engine(
     "sqlite:///./converse.db",
-    connect_args={"check_same_thread": False},  # SQLite + FastAPI
+    connect_args={"check_same_thread": False},
 )
+
 
 def create_db_and_tables() -> None:
     SQLModel.metadata.create_all(engine)
+
 
 def get_session():
     with Session(engine) as session:
