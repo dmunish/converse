@@ -9,7 +9,7 @@ A retrieval-augmented support assistant for **LearnForge**, an ed-tech platform.
 | Layer | Choice |
 |---|---|
 | LLM | Google Gemini (free tier) |
-| Embeddings | Google `text-embedding-004` |
+| Embeddings | Google `gemini-embedding-2` |
 | Vector store | LanceDB (local, hybrid + RRF) |
 | API | FastAPI + Uvicorn |
 | Chat UI | Chainlit (mounted at `/chat-ui`) |
