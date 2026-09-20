@@ -16,7 +16,7 @@ async def lifespan(app: FastAPI):
     create_db_and_tables()
     yield
 
-app = FastAPI(title="Converse: Support Assistant", lifespan=lifespan)
+app = FastAPI(title="Converse: LearnForge Support Assistant", lifespan=lifespan)
 
 
 # --- Schemas ---
@@ -25,14 +25,23 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
 
+
+class Source(BaseModel):
+    content: str
+    source: str
+    score: float | None = None
+    last_reviewed: str | None = None
+
+
 class ChatResponse(BaseModel):
     answer: str
     confidence: float
-    sources: list[dict]
+    sources: list[Source]
     human_handoff: bool
+    reason: str | None = None
 
 
-# --- Root redirect so "/" lands on Swagger ---
+# --- Root redirect ---
 
 @app.get("/")
 async def root():
@@ -52,8 +61,9 @@ async def chat(req: ChatRequest):
 async def chat_stream(req: ChatRequest):
     def event_stream():
         for event in stream_answer(req.message, req.session_id):
+            if event["type"] == "meta":
+                event = {k: v for k, v in event.items() if k != "sources"}
             yield f"data: {json.dumps(event)}\n\n"
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # --- Reviewer / ops endpoints ---
@@ -88,7 +98,5 @@ def eval_summary(db: Session = Depends(get_session)):
         "p95_latency_ms": latencies[min(int(len(latencies) * 0.95), len(latencies) - 1)],
     }
 
-
-# --- Mount Chainlit at /chat-ui ---
 
 mount_chainlit(app=app, target="ui.py", path="/chat-ui")

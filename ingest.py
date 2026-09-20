@@ -1,7 +1,13 @@
-"""Run: python ingest.py"""
 import os
+import re
+
 from dotenv import load_dotenv
-from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings, StorageContext
+from llama_index.core import (
+    Settings,
+    SimpleDirectoryReader,
+    StorageContext,
+    VectorStoreIndex,
+)
 from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
 from llama_index.vector_stores.lancedb import LanceDBVectorStore
 
@@ -12,7 +18,24 @@ Settings.embed_model = GoogleGenAIEmbedding(
     api_key=os.getenv("GEMINI_API_KEY"),
 )
 
+# LearnForge docs end with a review/effective line such as
+# "Last reviewed: February 2026." or "Effective date: January 2026."
+_DATE_RE = re.compile(
+    r"(?:Last reviewed|Last updated|Effective(?: date)?|Updated|Reviewed)"
+    r"\s*:?\s*([A-Z][a-z]+ \d{4})"
+)
+
+
+def _attach_dates(docs):
+    for d in docs:
+        m = _DATE_RE.search(d.text or "")
+        if m:
+            d.metadata["last_reviewed"] = m.group(1)
+    return docs
+
+
 docs = SimpleDirectoryReader("./docs").load_data()
+docs = _attach_dates(docs)
 
 vector_store = LanceDBVectorStore(
     uri=os.getenv("LANCEDB_URI", "./lancedb"),

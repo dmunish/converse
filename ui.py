@@ -1,8 +1,19 @@
 import json
+
 import httpx
 import chainlit as cl
 
 API_STREAM = "http://localhost:8000/chat/stream"
+
+_REASON_COPY = {
+    "user_requested": "you asked for a human",
+    "no_docs": "no relevant knowledge-base excerpts",
+    "not_answerable": "the knowledge base doesn't cover this",
+    "ungrounded": "the draft answer couldn't be verified against sources",
+    "low_confidence": "low confidence",
+    "generation_error": "a temporary generation error",
+    "out_of_scope": "the question is outside LearnForge support",
+}
 
 
 @cl.on_chat_start
@@ -36,12 +47,9 @@ async def on_message(message: cl.Message):
     if not meta:
         return
 
-    if meta["human_handoff"]:
-        await cl.Message(content="⚠️ **Escalated to human agent**").send()
+    if meta.get("human_handoff"):
+        why = _REASON_COPY.get(meta.get("reason"), meta.get("reason") or "")
+        await cl.Message(
+            content=f"**Escalating to a human agent** — {why}."
+        ).send()
 
-    if meta["sources"]:
-        lines = []
-        for s in meta["sources"]:
-            badge = " ⚠️ stale" if s.get("stale") else ""
-            lines.append(f"- `{s['source']}` (score: {s['score']:.2f}){badge}")
-        await cl.Message(content="**Sources:**\n" + "\n".join(lines)).send()
