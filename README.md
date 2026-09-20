@@ -56,27 +56,14 @@ Requires Python 3.10+ and a free Gemini key from https://aistudio.google.com/api
 git clone <this-repo> && cd converse
 python -m venv .venv && source .venv/bin/activate
 
-make install            # pip install -r requirements.txt
-cp .env.example .env    # paste GEMINI_API_KEY into .env
+pip install -r requirements.txt
+cp .env.example .env                                # paste GEMINI_API_KEY into .env
 
-make ingest             # build the LanceDB index from ./docs
-make dev                # start uvicorn with reload on :8000
+python ingest.py                                    # build the LanceDB index from ./docs
+uvicorn app:app --host 0.0.0.0 --port 8000          # start uvicorn with reload on :8000
 ```
 
 Open the chat at **http://localhost:8000/chat-ui** (Swagger at `/docs`).
-
-### Make targets
-
-| Target | Effect |
-|---|---|
-| `make install` | Install Python deps |
-| `make ingest` | Rebuild the LanceDB index from `./docs` |
-| `make run` | Start uvicorn (no reload) |
-| `make dev` | Start uvicorn with `--reload` |
-| `make smoke` | POST one sample question to `/chat` and pretty-print JSON |
-| `make clean` | Remove `./lancedb`, `./storage`, `./converse.db` |
-
-Full reset: `make clean && make ingest && make dev`.
 
 ---
 
@@ -91,12 +78,6 @@ Try these in the chat UI to exercise each branch:
 | `What about a subscription renewal?` | multi-turn condense → standalone query |
 | `I want to talk to a human` | `user_requested` escalation |
 | `What's the weather in Berlin?` | `out_of_scope` handling |
-
-CLI equivalent:
-
-```bash
-make smoke
-```
 
 Observability:
 
@@ -183,7 +164,7 @@ With more time: offline eval harness (biggest gap), cross-encoder reranking, esc
 
 ## Known limitations
 
-- Static KB snapshot; re-run `make ingest` after editing `docs/`.
+- Static KB snapshot; re-run `python ingest.py` after editing `docs/`.
 - Grader is itself an LLM — strong signal, not ground truth. The offline set calibrates it.
 - `QueryLog.sources` stores excerpt text inline; production would normalize to a `Chunk` table.
 - Single-worker assumption (SQLite file lock); multi-worker needs Postgres or WAL + pool.
@@ -201,7 +182,6 @@ converse/
 ├── ingest.py        build LanceDB index
 ├── rag.py           retrieve → generate → grade → gate
 ├── ui.py            Chainlit chat surface
-├── Makefile
 ├── requirements.txt
 └── .env.example
 ```
